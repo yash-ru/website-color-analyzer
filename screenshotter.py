@@ -80,6 +80,7 @@ class DomainScreenshotter:
                 context = await browser.new_context(
                     viewport={'width': 1920, 'height': 1080},
                     user_agent=user_agent,
+                    color_scheme="light",  # <-- THIS ENSURES light mode
                     locale='en-US',
                     timezone_id='America/New_York',
                     device_scale_factor=1,
