@@ -1,0 +1,25 @@
+# Core Web Scraping & Automation
+playwright==1.40.0
+
+# Image Processing & Computer Vision
+opencv-python==4.8.1.78
+Pillow==10.1.0
+
+# Data Processing & Analysis
+numpy==1.24.3
+pandas==2.1.4
+
+# Machine Learning (for KMeans clustering)
+scikit-learn==1.3.2
+
+# Visualization
+matplotlib==3.8.2
+
+# Web Interface
+streamlit==1.29.0
+
+# Excel Export (for styled Excel files)
+openpyxl==3.1.2
+
+# After installing requirements, you need to install Playwright browsers:
+# Run: playwright install chromium firefox
