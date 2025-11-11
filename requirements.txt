@@ -1,25 +1,34 @@
-# Core Web Scraping & Automation
-playwright==1.40.0
+# Core Web Framework
+streamlit>=1.37.0
 
-# Image Processing & Computer Vision
-opencv-python==4.8.1.78
-Pillow==10.1.0
+# Async Browser Automation
+playwright>=1.48.0
+playwright-stealth>=1.0.6
 
-# Data Processing & Analysis
-numpy==1.24.3
-pandas==2.1.4
+# Image & Color Analysis
+opencv-python-headless>=4.10.0
+numpy>=1.26.4
+scikit-learn>=1.5.0
+Pillow>=10.4.0
 
-# Machine Learning (for KMeans clustering)
-scikit-learn==1.3.2
+# Data Handling
+pandas>=2.2.2
+openpyxl>=3.1.5
 
-# Visualization
-matplotlib==3.8.2
+# Utilities
+tldextract>=5.1.2
+aiofiles>=23.2.1
+requests>=2.32.3
 
-# Web Interface
-streamlit==1.29.0
+# Optional: for color clustering & analysis helpers
+colorthief>=0.2.1
 
-# Excel Export (for styled Excel files)
-openpyxl==3.1.2
+# For WHOIS or DNS lookups (if used elsewhere)
+python-whois>=0.9.4
+dnspython>=2.7.0
 
-# After installing requirements, you need to install Playwright browsers:
-# Run: playwright install chromium firefox
+# For async efficiency and concurrency
+nest-asyncio>=1.6.0
+
+# Visualization (only needed if you show color palettes)
+matplotlib>=3.9.2
