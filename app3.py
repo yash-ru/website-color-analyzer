@@ -1,35 +1,31 @@
 #!/usr/bin/env python3
 """
-app.py - Streamlit Web Interface for Domain Screenshot & Color Analysis
+app.py - Streamlit Web Interface for Domain Screenshot & Color Analysis (Unified Mode)
 Usage: streamlit run app.py
 """
 
 import streamlit as st
 import os
 import asyncio
-from pathlib import Path
 import pandas as pd
+import time
+from io import BytesIO
+from pathlib import Path
 from PIL import Image
 
 # Import custom modules
 from screenshotter import DomainScreenshotter
 from color_analyzer2 import ColorAnalyzer
+from dominant_colors2 import is_neutral
 
+start_time = time.time()
 
 # ---------------- UI SETUP ---------------- #
-st.set_page_config(page_title="Domain Color Analyzer", layout="centered")
-st.title("🎨 Domain Screenshot & Color Analyzer")
+st.set_page_config(page_title="Website Color Analyzer", layout="centered")
+st.title("Website Color Analyzer")
 
-# Custom CSS
 st.markdown("""
     <style>
-    .main-header {
-        font-size: 2.2rem;
-        font-weight: bold;
-        color: #1E88E5;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
     .success-box {
         padding: 1rem;
         background-color: #d4edda;
@@ -47,149 +43,272 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-
 # ---------------- CORE FUNCTIONS ---------------- #
 async def capture_screenshot_async(domain, output_folder):
     """Async wrapper for screenshot capture."""
-    screenshotter = DomainScreenshotter(output_folder=output_folder, concurrency=1)
+    screenshotter = DomainScreenshotter(output_folder=output_folder, concurrency=5)
     results = await screenshotter.run([domain])
     return results[0] if results else None
 
+def hex_to_rgb(hex_color):
+    hex_color = hex_color.lstrip("#")
+    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
 
-def capture_and_analyze(domain, output_folder="screenshots",
-                        analysis_folder="color_analysis", num_colors=5, visualize=True):
-    """Capture screenshot then analyze colors."""
-    progress = st.progress(0, text="🔄 Starting...")
-
+def text_contrast_color(hex_color):
+    """Return black or white text based on hex color luminance."""
     try:
-        # Step 1: Capture Screenshot
-        progress.progress(0.25, text=f"📸 Capturing screenshot of {domain}...")
-        result = asyncio.run(capture_screenshot_async(domain, output_folder))
-        if not result or not result.get("success", False):
-            error_msg = result.get("error", "Unknown error") if result else "Failed to capture"
-            st.markdown(f"""
-                <div class="error-box"><strong>❌ Failed!</strong><br>{error_msg}</div>
-            """, unsafe_allow_html=True)
-            progress.empty()
-            return None
+        r, g, b = hex_to_rgb(hex_color)
+        luminance = (0.299*r + 0.587*g + 0.114*b) / 255
+        return "black" if luminance > 0.6 else "white"
+    except:
+        return "black"
 
-        screenshot_path = result["output_path"]
+def get_dominant_colors_from_result(analysis_result, top_n=2):
+    """
+    Extract top dominant colors and detect theme.
+    Returns: dominant_colors list, theme
+    """
+    colors = [
+        {"hex": c["hex"], "rgb": tuple(c["rgb"]) if "rgb" in c else hex_to_rgb(c["hex"]), "pct": c["percentage"]}
+        for c in analysis_result["colors"]
+    ]
 
-        # Step 2: Analyze Colors
-        progress.progress(0.65, text="🎨 Analyzing colors...")
+    if not colors:
+        return [""]*top_n, "Unknown"
+
+    # Compute weighted average brightness
+    avg_brightness = sum(c['pct'] * ((0.299*c['rgb'][0]+0.587*c['rgb'][1]+0.114*c['rgb'][2])/255) for c in colors) / max(sum(c['pct'] for c in colors), 0.0001)
+    theme = "Dark" if avg_brightness < 0.5 else "Light"
+
+    # Filter out neutral colors
+    non_neutral = [c for c in colors if not is_neutral(c['rgb'])]
+
+    # Choose dominant colors based on theme
+    dominant_colors = []
+    if theme == "Dark":
+        # Bright accents in dark theme
+        bright_colors = [c for c in non_neutral if ((0.299*c['rgb'][0]+0.587*c['rgb'][1]+0.114*c['rgb'][2])/255) > 0.15]
+        if not bright_colors:
+            bright_colors = non_neutral or colors
+        bright_colors.sort(key=lambda x: x['pct']*((0.299*x['rgb'][0]+0.587*x['rgb'][1]+0.114*x['rgb'][2])/255), reverse=True)
+        dominant_colors = bright_colors[:top_n]
+    else:
+        # Just pick top percentages in light theme
+        non_neutral.sort(key=lambda x: -x['pct'])
+        dominant_colors = non_neutral[:top_n]
+
+    # Ensure top_n elements
+    while len(dominant_colors) < top_n:
+        dominant_colors.append({"hex": ""})
+
+    return [c['hex'] for c in dominant_colors], theme
+
+
+def analyze_domain(domain, output_folder, analysis_folder, num_colors, visualize):
+    """Capture screenshot, analyze colors, and add dominant colors."""
+    try:
+        # Reuse the bulk logic for consistency
+        results = asyncio.run(run_bulk_analysis_async([domain], output_folder, analysis_folder, num_colors, visualize))
+        result = results[0] if results else {"domain": domain, "error": "Processing failed"}
+        if not result or not result.get("success"):
+            return {"domain": domain, "error": result.get("error", "Screenshot failed")}
+
         analyzer = ColorAnalyzer(output_folder=analysis_folder)
-        analysis_result = analyzer.analyze_single(screenshot_path, num_colors=num_colors, visualize=visualize)
+        analysis_result = analyzer.analyze_single(result["output_path"], num_colors=num_colors, visualize=visualize)
 
         if not analysis_result:
-            st.error("Error analyzing colors.")
-            progress.empty()
-            return None
+            return {"domain": domain, "error": "Color analysis failed"}
 
-        # Step 3: Done
-        progress.progress(1.0, text="✅ Completed successfully!")
-        st.session_state.analysis_result = analysis_result
-        st.session_state.screenshot_path = screenshot_path
-        progress.empty()
-        return analysis_result
+        # Sort top colors by percentage
+        colors_sorted = sorted(analysis_result["colors"], key=lambda x: x["percentage"], reverse=True)
+
+        flattened = {"domain": analysis_result["domain"]}
+        for i, color in enumerate(colors_sorted, start=1):
+            flattened[f"top{i}_hex"] = color["hex"]
+            flattened[f"top{i}_pct"] = color["percentage"]
+
+        # Extract dominant colors
+        dominant_colors, theme = get_dominant_colors_from_result(analysis_result, top_n=2)
+        flattened["dominant_color_1"] = dominant_colors[0] if len(dominant_colors) > 0 else ""
+        flattened["dominant_color_2"] = dominant_colors[1] if len(dominant_colors) > 1 else ""
+        flattened["theme"] = theme
+
+        return flattened
 
     except Exception as e:
-        st.markdown(f"""
-            <div class="error-box"><strong>⚠️ Error:</strong> {str(e)}</div>
-        """, unsafe_allow_html=True)
-        progress.empty()
+        return {"domain": domain, "error": str(e)}
+
+async def run_bulk_analysis_async(domains, output_folder, analysis_folder, num_colors, visualize=False):
+    """Parallel screenshot capture + parallel color analysis"""
+    
+    # STEP 1: Capture ALL screenshots in parallel
+    st.info(f"📸 Capturing screenshots for {len(domains)} domains...")
+    screenshotter = DomainScreenshotter(output_folder=output_folder, concurrency=5)
+    screenshot_results = await screenshotter.run(domains)
+    
+    # STEP 2: Filter successful screenshots
+    successful = [r for r in screenshot_results if r.get("success")]
+    failed = [r for r in screenshot_results if not r.get("success")]
+    
+    if failed:
+        st.warning(f"⚠️ {len(failed)} screenshots failed: {[r['domain'] for r in failed]}")
+    
+    if not successful:
+        return []
+    
+    # STEP 3: Analyze ALL colors in parallel using multiprocessing
+    st.info(f"🎨 Analyzing colors for {len(successful)} screenshots...")
+    analyzer = ColorAnalyzer(screenshots_folder=output_folder, output_folder=analysis_folder)
+    
+    # Use the existing multiprocessing capability
+    analysis_results = analyzer.analyze_all(num_colors=num_colors, visualize=visualize, workers=6)
+    
+    # STEP 4: Merge results and add dominant colors
+    final_results = []
+    for analysis in analysis_results:
+        # Find corresponding screenshot result
+        screenshot_result = next((s for s in successful if s['domain'].replace('https://', '').replace('http://', '').rstrip('/').replace('/', '_').replace(':', '_').replace('www.', '') == analysis['domain']), None)
+        
+        # Flatten colors
+        flattened = {"domain": analysis["domain"]}
+        colors_sorted = sorted(analysis["colors"], key=lambda x: x["percentage"], reverse=True)
+        
+        for i, color in enumerate(colors_sorted, start=1):
+            flattened[f"top{i}_hex"] = color["hex"]
+            flattened[f"top{i}_pct"] = color["percentage"]
+        
+        # Add dominant colors
+        dominant_colors, theme = get_dominant_colors_from_result(analysis, top_n=2)
+        flattened["dominant_color_1"] = dominant_colors[0] if len(dominant_colors) > 0 else ""
+        flattened["dominant_color_2"] = dominant_colors[1] if len(dominant_colors) > 1 else ""
+        flattened["theme"] = theme
+        
+        final_results.append(flattened)
+    
+    return final_results
+
+def style_dataframe(df):
+    """Apply styling to hex and percentage columns."""
+    hex_cols = [col for col in df.columns if col.startswith("top") and "_hex" in col] + \
+               [col for col in df.columns if col.startswith("dominant_color")]
+
+    pct_cols = [col for col in df.columns if col.startswith("top") and "_pct" in col]
+
+    df_styled = df.style.applymap(
+        lambda val: f"background-color: {val}; color: {text_contrast_color(val)}",
+        subset=hex_cols
+    )
+
+    df_styled = df_styled.bar(subset=pct_cols, color="#4caf50", vmin=0, vmax=1)
+    return df_styled
+
+def download_excel(df, filename):
+    """Download DataFrame as Excel preserving hex background colors."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import PatternFill, Font
+    except ImportError:
+        st.error("Please install openpyxl: pip install openpyxl")
         return None
 
+    wb = Workbook()
+    ws = wb.active
+    ws.append(df.columns.tolist())
+
+    for _, row in df.iterrows():
+        ws.append([row[c] for c in df.columns])
+
+    for i, col in enumerate(df.columns, start=1):
+        if "_hex" in col or "dominant_color" in col:
+            for j, val in enumerate(df[col], start=2):
+                try:
+                    fill = PatternFill(start_color=val.lstrip("#"), end_color=val.lstrip("#"), fill_type="solid")
+                    text_color = text_contrast_color(val)
+                    font = Font(color="000000" if text_color=="black" else "FFFFFF")
+                    ws.cell(row=j, column=i).fill = fill
+                    ws.cell(row=j, column=i).font = font
+                except:
+                    continue
+    with BytesIO() as output:
+        wb.save(output)
+        return output.getvalue()
 
 # ---------------- MAIN APP ---------------- #
 def main():
-    st.write("Enter a domain to **capture its screenshot** and **analyze its dominant colors.**")
-    domain = st.text_input("Domain", placeholder="example.com or https://example.com")
-    num_colors = st.slider("Number of Colors", min_value=3, max_value=10, value=5)
-    visualize = st.toggle("Generate Color Palette Image", value=True)
+    st.write("Enter one or more domains (each on a new line)")
+    domains_input = st.text_area("Domains", placeholder="example.com\nopenai.com\ngoogle.com", height=150)
+
+    #num_colors = st.slider("Number of Colors", 3, 10, 5)
+    #visualize = st.toggle("Generate Color Palette Images", value=True)
+    
+    num_colors = 5
+    visualize = False
 
     output_folder = "screenshots"
     analysis_folder = "color_analysis"
 
-    if st.button("Capture & Analyze", use_container_width=True) and domain:
-        with st.spinner(f"Processing {domain}..."):
-            result = capture_and_analyze(domain, output_folder, analysis_folder, num_colors, visualize)
+    if st.button("Analyze", use_container_width=True) and domains_input.strip():
+        domains = [d.strip() for d in domains_input.splitlines() if d.strip()]
 
-        if result:
-            # Display screenshot
-            st.subheader("📸 Screenshot Preview")
-            if os.path.exists(st.session_state.screenshot_path):
-                image = Image.open(st.session_state.screenshot_path)
-                st.image(image, use_container_width=True)
+        # Single domain
+        if len(domains) == 1:
+            domain = domains[0]
+            with st.spinner(f"Processing {domain}..."):
+                results = asyncio.run(run_bulk_analysis_async([domain], output_folder, analysis_folder, num_colors, visualize))
+                result = results[0] if results else {"domain": domain, "error": "Processing failed"}
 
-            # Display color analysis
-            st.markdown("---")
-            st.subheader("🎨 Color Analysis Results")
+            if "error" in result:
+                st.error(f"❌ {domain}: {result['error']}")
+            else:
+                st.success(f"✅ Analysis completed for {domain}")
 
-            palette_path = os.path.join(analysis_folder, f"{result['domain']}_palette.png")
-            if visualize and os.path.exists(palette_path):
-                st.image(palette_path, caption="Color Palette", use_container_width=True)
+                screenshot_path = os.path.join(output_folder, f"{result['domain']}.png")
+                palette_path = os.path.join(analysis_folder, f"{result['domain']}_palette.png")
 
-            # Data Table
-            color_data = [
-                {
-                    "Rank": i + 1,
-                    "Hex": c["hex"],
-                    "RGB": f"({c['rgb'][0]}, {c['rgb'][1]}, {c['rgb'][2]})",
-                    "Percentage": f"{c['percentage']}%"
-                }
-                for i, c in enumerate(result["colors"])
-            ]
-            df = pd.DataFrame(color_data)
-            st.dataframe(df, use_container_width=True, hide_index=True)
-
-            # Color Swatches
-            st.markdown("### 🎨 Color Swatches")
-            cols = st.columns(len(result["colors"]))
-            for col, color in zip(cols, result["colors"]):
-                text_color = "white" if sum(color["rgb"]) < 382 else "black"
-                col.markdown(f"""
-                    <div style="
-                        background-color: {color['hex']};
-                        height: 100px;
-                        border-radius: 10px;
-                        border: 2px solid #ddd;
-                        display: flex;
-                        align-items: center;
-                        justify-content: center;
-                        color: {text_color};
-                        font-weight: bold;
-                        font-size: 14px;">
-                        {color['percentage']}%
-                    </div>
-                    <p style="text-align: center; margin-top: 5px; font-size: 12px;">
-                        {color['hex']}
-                    </p>
-                """, unsafe_allow_html=True)
-
-            # Download buttons
-            st.markdown("---")
-            st.subheader("⬇️ Download Results")
-
-            col1, col2, col3 = st.columns(3)
-
-            with col1:
-                if os.path.exists(st.session_state.screenshot_path):
-                    with open(st.session_state.screenshot_path, "rb") as f:
-                        st.download_button("Screenshot", f, f"{result['domain']}_screenshot.png", "image/png")
-
-            with col2:
+                if os.path.exists(screenshot_path):
+                    st.image(screenshot_path, caption="Screenshot", use_container_width=True)
                 if visualize and os.path.exists(palette_path):
-                    with open(palette_path, "rb") as f:
-                        st.download_button("Palette", f, f"{result['domain']}_palette.png", "image/png")
+                    st.image(palette_path, caption="Color Palette", use_container_width=True)
 
-            with col3:
-                csv_data = df.to_csv(index=False)
-                st.download_button("CSV", csv_data, f"{result['domain']}_colors.csv", "text/csv")
+                st.subheader("🎨 Color Summary (Top Colors + Dominant)")
+                df = pd.DataFrame([result])
+                st.dataframe(style_dataframe(df), use_container_width=True)
 
-    # Footer
-    st.markdown("---")
-    st.caption("⚡ Powered by Playwright + OpenCV + MiniBatchKMeans")
+                excel_bytes = download_excel(df, f"{domain}_colors.xlsx")
+                if excel_bytes:
+                    st.download_button("📥 Download Excel", excel_bytes, f"{domain}_colors.xlsx",
+                                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+        # Bulk domains
+        else:
+            results = asyncio.run(run_bulk_analysis_async(domains, output_folder, analysis_folder, num_colors, visualize))
+            
+            valid_results = [r for r in results if "error" not in r]
+
+            valid_results = [r for r in results if "error" not in r]
+            error_results = [r for r in results if "error" in r]
+
+            if valid_results:
+                st.markdown("---")
+                st.subheader("Bulk Analysis Results")
+
+                df_out = pd.DataFrame(valid_results)
+                st.dataframe(style_dataframe(df_out), use_container_width=True)
+
+                excel_bytes = download_excel(df_out, "bulk_color_results.xlsx")
+                if excel_bytes:
+                    st.download_button("📥 Download All Results", excel_bytes,
+                                       "bulk_color_results.xlsx",
+                                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+            if error_results:
+                st.warning(f"⚠️ {len(error_results)} domains failed.")
+                for e in error_results:
+                    st.write(f"- {e['domain']}: {e['error']}")
 
 
 if __name__ == "__main__":
     main()
+
+total_elapsed = time.time() - start_time
+st.success(f"✅ Total processing time: {total_elapsed:.2f} seconds")
