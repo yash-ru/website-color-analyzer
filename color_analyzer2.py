@@ -11,8 +11,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from sklearn.cluster import MiniBatchKMeans
+from sklearn.cluster import KMeans
+import time
 
+start = time.time()
 
 class ColorAnalyzer:
     def __init__(self, screenshots_folder="screenshots", output_folder="color_analysis"):
@@ -29,15 +31,45 @@ class ColorAnalyzer:
 
         # Downsample for huge speedup
         #img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        #small = cv2.resize(img_rgb, (150, 150), interpolation=cv2.INTER_AREA)
+        #small = cv2.resize(img_rgb, (450, 450), interpolation=cv2.INTER_AREA)
         #pixels = small.reshape(-1, 3)
 
         
+        #img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        #pixels = np.float32(img_rgb.reshape(-1, 3))
+
+                # Convert to RGB first
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        pixels = np.float32(img_rgb.reshape(-1, 3))
+# ---------- Adaptive resize with aspect-ratio-based pixel budget ---------- #
+        h, w = img_rgb.shape[:2]
+        aspect_ratio = h / w
+
+        # Base pixel budget (for roughly 1280x800-like screenshots)
+        base_pixels = 1_000_000  
+
+        # Scale budget for taller screenshots
+        if aspect_ratio < 1.2:
+            max_pixels = base_pixels
+        elif aspect_ratio < 2.0:
+            max_pixels = int(base_pixels * 1.2)
+        elif aspect_ratio < 3.0:
+            max_pixels = int(base_pixels * 1.5)
+        else:
+            max_pixels = int(base_pixels * 2.0)
+
+        # Compute resize scale
+        current_pixels = h * w
+        scale = (max_pixels / current_pixels) ** 0.5 if current_pixels > max_pixels else 1.0
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+
+        # Resize image preserving aspect ratio
+        small = cv2.resize(img_rgb, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        pixels = small.reshape(-1, 3)
 
 
-        kmeans = MiniBatchKMeans(n_clusters=num_colors, batch_size=4096, n_init="auto", random_state=42)
+
+        kmeans = KMeans(n_clusters=num_colors, n_init="auto", random_state=42)
         labels = kmeans.fit_predict(pixels)
         centers = np.uint8(kmeans.cluster_centers_)
 
@@ -128,35 +160,38 @@ class ColorAnalyzer:
                     results.append(result)
 
         if results:
-            self.save_results(results)
+            self.save_results(results, num_colors=num_colors)
         return results
 
     # ---------- OUTPUT ---------- #
-    def save_results(self, results):
-        """Save color data to CSV."""
-        detailed = []
+    def save_results(self, results, num_colors=5):
+        """Save flattened one-row-per-domain color data to CSV."""
+        rows = []
         for result in results:
             domain = result["domain"]
-            for idx, color_data in enumerate(result["colors"], 1):
-                detailed.append(
-                    {
-                        "domain": domain,
-                        "color_rank": idx,
-                        "red": color_data["rgb"][0],
-                        "green": color_data["rgb"][1],
-                        "blue": color_data["rgb"][2],
-                        "hex": color_data["hex"],
-                        "percentage": color_data["percentage"],
-                    }
-                )
+            row = {"domain": domain}
+            
+            for i, color_data in enumerate(result["colors"], start=1):
+                hex_col = color_data["hex"]
+                pct = color_data["percentage"]
+                row[f"top{i}_hex"] = hex_col
+                row[f"top{i}_pct"] = pct
 
-        df = pd.DataFrame(detailed)
+            # Fill missing colors if fewer than num_colors
+            for i in range(len(result["colors"]) + 1, num_colors + 1):
+                row[f"top{i}_hex"] = None
+                row[f"top{i}_pct"] = None
+
+            rows.append(row)
+
+        df = pd.DataFrame(rows)
         csv_path = os.path.join(self.output_folder, "color_analysis.csv")
         df.to_csv(csv_path, index=False)
 
         print(f"\n💾 Results saved: {csv_path}")
         print(f"🎨 Palettes in: {self.output_folder}/")
         self.print_summary(results)
+
 
     @staticmethod
     def print_summary(results):
@@ -191,3 +226,6 @@ if __name__ == "__main__":
         visualize=True,  # set True to enable palette PNGs
         workers=6,         # adjust based on CPU cores
     )
+
+end = time.time()
+print(f"\n⏱️ Total execution time: {end - start:.2f} seconds")
