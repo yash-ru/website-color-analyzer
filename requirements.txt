@@ -32,3 +32,6 @@ nest-asyncio>=1.6.0
 
 # Visualization (only needed if you show color palettes)
 matplotlib>=3.9.2
+
+playwright>=1.48.0
+playwright-stealth>=1.0.6
